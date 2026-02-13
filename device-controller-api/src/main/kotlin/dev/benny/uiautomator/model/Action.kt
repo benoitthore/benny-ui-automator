@@ -1,0 +1,8 @@
+package dev.benny.uiautomator.model
+
+enum class Action {
+    LAUNCH_APP, STOP_APP, DELAY, WAIT_FOR, WAIT_FOR_IDLE,
+    CLICK, LONG_CLICK, TYPE_TEXT, CLEAR_AND_TYPE,
+    SWIPE, SCROLL_UNTIL_FOUND,
+    PRESS_BACK, PRESS_HOME, PRESS_RECENT_APPS, CLICK_AT
+}
