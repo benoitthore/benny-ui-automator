@@ -216,6 +216,135 @@ class InstrumentationDeviceInteractor(
         Runtime.getRuntime().exec(arrayOf("input", "text", text)).waitFor()
     }
 
+    // Drag
+
+    override fun drag(fromX: Int, fromY: Int, toX: Int, toY: Int, durationMs: Int) {
+        val steps = (durationMs / 5).coerceAtLeast(1)
+        device.swipe(fromX, fromY, toX, toY, steps)
+    }
+
+    // System controls (shell commands from on-device instrumentation)
+
+    private fun shell(vararg args: String): String {
+        val process = Runtime.getRuntime().exec(args)
+        val output = process.inputStream.bufferedReader().readText()
+        process.waitFor()
+        return output
+    }
+
+    override fun setWifiEnabled(enabled: Boolean) {
+        shell("svc", "wifi", if (enabled) "enable" else "disable")
+    }
+
+    override fun setBluetoothEnabled(enabled: Boolean) {
+        shell("cmd", "bluetooth_manager", if (enabled) "enable" else "disable")
+    }
+
+    override fun setAirplaneModeEnabled(enabled: Boolean) {
+        val value = if (enabled) "1" else "0"
+        shell("settings", "put", "global", "airplane_mode_on", value)
+        shell("am", "broadcast", "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", enabled.toString())
+    }
+
+    override fun setScreenRotation(mode: String) {
+        when (mode) {
+            "auto" -> shell("settings", "put", "system", "accelerometer_rotation", "1")
+            else -> {
+                shell("settings", "put", "system", "accelerometer_rotation", "0")
+                val rotation = when (mode) {
+                    "portrait" -> "0"; "landscape" -> "1"
+                    "reverse_portrait" -> "2"; "reverse_landscape" -> "3"
+                    else -> "0"
+                }
+                shell("settings", "put", "system", "user_rotation", rotation)
+            }
+        }
+    }
+
+    override fun wakeScreen() { device.wakeUp() }
+    override fun sleepScreen() { device.sleep() }
+    override fun lockScreen() { shell("input", "keyevent", "KEYCODE_POWER") }
+
+    override fun setVolume(stream: String, level: Int) {
+        val streamIndex = when (stream) {
+            "music" -> "3"; "ring" -> "2"; "notification" -> "5"; "alarm" -> "4"; "system" -> "1"; else -> "3"
+        }
+        shell("media", "volume", "--stream", streamIndex, "--set", level.toString())
+    }
+
+    override fun setBrightness(level: Int) {
+        val clamped = level.coerceIn(0, 255)
+        shell("settings", "put", "system", "screen_brightness_mode", "0")
+        shell("settings", "put", "system", "screen_brightness", clamped.toString())
+    }
+
+    override fun reboot(mode: String?) {
+        if (mode != null) shell("reboot", mode) else shell("reboot")
+    }
+
+    // App management
+
+    override fun installApp(apkPath: String): InteractionResult = try {
+        shell("pm", "install", "-r", apkPath)
+        InteractionResult.Success("Installed: $apkPath")
+    } catch (e: Exception) { InteractionResult.Error(e) }
+
+    override fun uninstallApp(packageName: String): InteractionResult = try {
+        shell("pm", "uninstall", packageName)
+        InteractionResult.Success("Uninstalled: $packageName")
+    } catch (e: Exception) { InteractionResult.Error(e) }
+
+    override fun listPackages(filter: String?): List<String> {
+        val output = if (filter != null) shell("pm", "list", "packages", filter)
+        else shell("pm", "list", "packages")
+        return output.lines().filter { it.startsWith("package:") }.map { it.removePrefix("package:").trim() }.sorted()
+    }
+
+    override fun openUrl(url: String): InteractionResult = try {
+        shell("am", "start", "-a", "android.intent.action.VIEW", "-d", url)
+        InteractionResult.Success("Opened URL: $url")
+    } catch (e: Exception) { InteractionResult.Error(e) }
+
+    override fun grantPermission(packageName: String, permission: String) {
+        shell("pm", "grant", packageName, permission)
+    }
+
+    override fun revokePermission(packageName: String, permission: String) {
+        shell("pm", "revoke", packageName, permission)
+    }
+
+    override fun clearAppData(packageName: String): InteractionResult = try {
+        shell("pm", "clear", packageName)
+        InteractionResult.Success("Cleared data: $packageName")
+    } catch (e: Exception) { InteractionResult.Error(e) }
+
+    // Clipboard
+
+    override fun getClipboard(): String = shell("am", "broadcast", "-a", "clipper.get").trim()
+    override fun setClipboard(text: String) { shell("am", "broadcast", "-a", "clipper.set", "-e", "text", text) }
+
+    // Notifications
+
+    override fun openNotifications() { shell("cmd", "statusbar", "expand-notifications") }
+    override fun openQuickSettings() { shell("cmd", "statusbar", "expand-settings") }
+
+    // File management
+
+    override fun pushFile(localPath: String, remotePath: String): InteractionResult =
+        InteractionResult.Error(UnsupportedOperationException("pushFile not available from instrumentation"))
+
+    override fun pullFile(remotePath: String, localPath: String): InteractionResult =
+        InteractionResult.Error(UnsupportedOperationException("pullFile not available from instrumentation"))
+
+    // Device info
+
+    override fun getBatteryInfo(): String = shell("dumpsys", "battery")
+    override fun getConnectivityInfo(): String {
+        val wifi = shell("dumpsys", "wifi").lines().take(20).joinToString("\n")
+        val net = shell("dumpsys", "connectivity").lines().take(30).joinToString("\n")
+        return "=== WiFi ===\n$wifi\n\n=== Connectivity ===\n$net"
+    }
+
     // Terminal output
 
     override fun terminalPrint(msg: String) {

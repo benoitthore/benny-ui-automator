@@ -48,6 +48,46 @@ interface DeviceInteractor {
     fun pressKeyEvent(keyCode: Int)
     fun inputRawText(text: String)
 
+    // Drag
+    fun drag(fromX: Int, fromY: Int, toX: Int, toY: Int, durationMs: Int = 500)
+
+    // System controls
+    fun setWifiEnabled(enabled: Boolean)
+    fun setBluetoothEnabled(enabled: Boolean)
+    fun setAirplaneModeEnabled(enabled: Boolean)
+    fun setScreenRotation(mode: String) // "auto", "portrait", "landscape", "reverse_portrait", "reverse_landscape"
+    fun wakeScreen()
+    fun sleepScreen()
+    fun lockScreen()
+    fun setVolume(stream: String, level: Int) // stream: "music", "ring", "notification", "alarm", "system"
+    fun setBrightness(level: Int) // 0-255
+    fun reboot(mode: String? = null) // null = normal, "recovery", "bootloader"
+
+    // App management
+    fun installApp(apkPath: String): InteractionResult
+    fun uninstallApp(packageName: String): InteractionResult
+    fun listPackages(filter: String? = null): List<String>
+    fun openUrl(url: String): InteractionResult
+    fun grantPermission(packageName: String, permission: String)
+    fun revokePermission(packageName: String, permission: String)
+    fun clearAppData(packageName: String): InteractionResult
+
+    // Clipboard
+    fun getClipboard(): String
+    fun setClipboard(text: String)
+
+    // Notifications
+    fun openNotifications()
+    fun openQuickSettings()
+
+    // File management
+    fun pushFile(localPath: String, remotePath: String): InteractionResult
+    fun pullFile(remotePath: String, localPath: String): InteractionResult
+
+    // Device info
+    fun getBatteryInfo(): String
+    fun getConnectivityInfo(): String
+
     // Output & debug
     fun terminalPrint(msg: String)
     fun logcat(): Flow<String>

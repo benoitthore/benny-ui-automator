@@ -181,13 +181,27 @@ class AdbDeviceInteractor(
             IllegalStateException("Node has no bounds: $selector")
         )
         return try {
-            // Tap the field
-            adb("shell", "input", "tap", bounds.centerX().toString(), bounds.centerY().toString())
+            val cx = bounds.centerX().toString()
+            val cy = bounds.centerY().toString()
+            // Triple-tap to select all text in the field
+            adb("shell", "input", "tap", cx, cy)
+            Thread.sleep(50)
+            adb("shell", "input", "tap", cx, cy)
+            Thread.sleep(50)
+            adb("shell", "input", "tap", cx, cy)
             Thread.sleep(200)
-            // Select all: Ctrl+A
-            adb("shell", "input", "keyevent", "KEYCODE_MOVE_HOME")
-            adb("shell", "input", "keyevent", "--longpress", *Array(50) { "KEYCODE_DEL" })
+            // Delete the selection (covers selected text; if nothing selected, harmless)
+            adb("shell", "input", "keyevent", "KEYCODE_DEL")
             Thread.sleep(100)
+            // Fallback: if triple-tap didn't select everything, brute-force delete remaining
+            // Move to end then delete back based on known text length (batched in one shell call)
+            val existingLen = node.text?.length ?: 0
+            if (existingLen > 0) {
+                val delKeys = (listOf("KEYCODE_MOVE_END") + List(existingLen) { "KEYCODE_DEL" })
+                    .joinToString(" ")
+                adb("shell", "input", "keyevent", *delKeys.split(" ").toTypedArray())
+                Thread.sleep(100)
+            }
             inputText(text)
             InteractionResult.Success("Cleared and typed: $text")
         } catch (e: Exception) {
@@ -257,6 +271,189 @@ class AdbDeviceInteractor(
 
     override fun inputRawText(text: String) {
         inputText(text)
+    }
+
+    // Drag
+
+    override fun drag(fromX: Int, fromY: Int, toX: Int, toY: Int, durationMs: Int) {
+        adb("shell", "input", "swipe",
+            fromX.toString(), fromY.toString(), toX.toString(), toY.toString(), durationMs.toString())
+    }
+
+    // System controls
+
+    override fun setWifiEnabled(enabled: Boolean) {
+        adb("shell", "svc", "wifi", if (enabled) "enable" else "disable")
+    }
+
+    override fun setBluetoothEnabled(enabled: Boolean) {
+        if (enabled) {
+            adb("shell", "cmd", "bluetooth_manager", "enable")
+        } else {
+            adb("shell", "cmd", "bluetooth_manager", "disable")
+        }
+    }
+
+    override fun setAirplaneModeEnabled(enabled: Boolean) {
+        val value = if (enabled) "1" else "0"
+        adb("shell", "settings", "put", "global", "airplane_mode_on", value)
+        adb("shell", "am", "broadcast", "-a", "android.intent.action.AIRPLANE_MODE",
+            "--ez", "state", enabled.toString())
+    }
+
+    override fun setScreenRotation(mode: String) {
+        when (mode) {
+            "auto" -> {
+                adb("shell", "settings", "put", "system", "accelerometer_rotation", "1")
+            }
+            else -> {
+                adb("shell", "settings", "put", "system", "accelerometer_rotation", "0")
+                val rotation = when (mode) {
+                    "portrait" -> "0"
+                    "landscape" -> "1"
+                    "reverse_portrait" -> "2"
+                    "reverse_landscape" -> "3"
+                    else -> "0"
+                }
+                adb("shell", "settings", "put", "system", "user_rotation", rotation)
+            }
+        }
+    }
+
+    override fun wakeScreen() {
+        adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+    }
+
+    override fun sleepScreen() {
+        adb("shell", "input", "keyevent", "KEYCODE_SLEEP")
+    }
+
+    override fun lockScreen() {
+        adb("shell", "input", "keyevent", "KEYCODE_POWER")
+    }
+
+    override fun setVolume(stream: String, level: Int) {
+        val streamIndex = when (stream) {
+            "music" -> "3"
+            "ring" -> "2"
+            "notification" -> "5"
+            "alarm" -> "4"
+            "system" -> "1"
+            else -> "3"
+        }
+        adb("shell", "media", "volume", "--stream", streamIndex, "--set", level.toString())
+    }
+
+    override fun setBrightness(level: Int) {
+        val clamped = level.coerceIn(0, 255)
+        adb("shell", "settings", "put", "system", "screen_brightness_mode", "0") // manual
+        adb("shell", "settings", "put", "system", "screen_brightness", clamped.toString())
+    }
+
+    override fun reboot(mode: String?) {
+        if (mode != null) {
+            adb("reboot", mode)
+        } else {
+            adb("reboot")
+        }
+    }
+
+    // App management
+
+    override fun installApp(apkPath: String): InteractionResult = try {
+        adb("install", "-r", apkPath)
+        InteractionResult.Success("Installed: $apkPath")
+    } catch (e: Exception) {
+        InteractionResult.Error(e)
+    }
+
+    override fun uninstallApp(packageName: String): InteractionResult = try {
+        adb("uninstall", packageName)
+        InteractionResult.Success("Uninstalled: $packageName")
+    } catch (e: Exception) {
+        InteractionResult.Error(e)
+    }
+
+    override fun listPackages(filter: String?): List<String> {
+        val output = if (filter != null) {
+            adb("shell", "pm", "list", "packages", filter)
+        } else {
+            adb("shell", "pm", "list", "packages")
+        }
+        return output.lines()
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:").trim() }
+            .sorted()
+    }
+
+    override fun openUrl(url: String): InteractionResult = try {
+        adb("shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url)
+        InteractionResult.Success("Opened URL: $url")
+    } catch (e: Exception) {
+        InteractionResult.Error(e)
+    }
+
+    override fun grantPermission(packageName: String, permission: String) {
+        adb("shell", "pm", "grant", packageName, permission)
+    }
+
+    override fun revokePermission(packageName: String, permission: String) {
+        adb("shell", "pm", "revoke", packageName, permission)
+    }
+
+    override fun clearAppData(packageName: String): InteractionResult = try {
+        adb("shell", "pm", "clear", packageName)
+        InteractionResult.Success("Cleared data: $packageName")
+    } catch (e: Exception) {
+        InteractionResult.Error(e)
+    }
+
+    // Clipboard
+
+    override fun getClipboard(): String {
+        return adb("shell", "am", "broadcast", "-a", "clipper.get").trim()
+    }
+
+    override fun setClipboard(text: String) {
+        adb("shell", "am", "broadcast", "-a", "clipper.set", "-e", "text", text)
+    }
+
+    // Notifications
+
+    override fun openNotifications() {
+        adb("shell", "cmd", "statusbar", "expand-notifications")
+    }
+
+    override fun openQuickSettings() {
+        adb("shell", "cmd", "statusbar", "expand-settings")
+    }
+
+    // File management
+
+    override fun pushFile(localPath: String, remotePath: String): InteractionResult = try {
+        adb("push", localPath, remotePath)
+        InteractionResult.Success("Pushed $localPath to $remotePath")
+    } catch (e: Exception) {
+        InteractionResult.Error(e)
+    }
+
+    override fun pullFile(remotePath: String, localPath: String): InteractionResult = try {
+        adb("pull", remotePath, localPath)
+        InteractionResult.Success("Pulled $remotePath to $localPath")
+    } catch (e: Exception) {
+        InteractionResult.Error(e)
+    }
+
+    // Device info
+
+    override fun getBatteryInfo(): String {
+        return adb("shell", "dumpsys", "battery")
+    }
+
+    override fun getConnectivityInfo(): String {
+        val wifi = adb("shell", "dumpsys", "wifi").lines().take(20).joinToString("\n")
+        val net = adb("shell", "dumpsys", "connectivity").lines().take(30).joinToString("\n")
+        return "=== WiFi ===\n$wifi\n\n=== Connectivity ===\n$net"
     }
 
     // Output & debug
