@@ -27,7 +27,10 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import dev.benny.uiautomator.core.AdbDeviceInteractor
+import dev.benny.uiautomator.core.ScreenQuery
+import dev.benny.uiautomator.core.ScreenSnapshot
 import dev.benny.uiautomator.model.InteractionResult
+import dev.benny.uiautomator.model.NodeType
 import dev.benny.uiautomator.model.ScreenNode
 import dev.benny.uiautomator.model.Selector
 import dev.benny.uiautomator.model.SwipeDirection
@@ -45,18 +48,142 @@ fun runMcpServer(interactor: AdbDeviceInteractor) {
 
     // --- Observation tools ---
 
+    // Last screen capture. Node ids (#n) returned by the screen tools refer to this snapshot, so
+    // tools that take a node_id read from it instead of re-dumping (which would renumber nodes).
+    var snapshot: ScreenSnapshot? = null
+    var snapshotVersion = 0
+    fun captureScreen(): ScreenSnapshot =
+        ScreenSnapshot(interactor.dumpScreen(), ++snapshotVersion).also { snapshot = it }
+    fun cachedOrCapture(): ScreenSnapshot = snapshot ?: captureScreen()
+
     server.addTool(
         name = "dump_screen",
-        description = "Inspect the current screen. Returns the full UI element tree showing every visible element " +
-                "with its text, resource-id, content-description, class, bounds, and state (clickable, scrollable, " +
-                "checked, etc). IMPORTANT: Always call this BEFORE interacting with any element. Use the output to " +
-                "find the right selector (text, resource-id, or description) for click/type/wait actions. Never " +
-                "guess element positions — always observe first. PREFER this over take_screenshot — it is faster, " +
-                "cheaper, and provides structured data. Only use take_screenshot when this tool doesn't provide " +
-                "enough information (e.g. WebView content, images, visual layout)."
-    ) {
-        val screen = interactor.dumpScreen()
-        CallToolResult(content = listOf(TextContent(screen.prettyPrint())))
+        description = "Inspect the current screen. IMPORTANT: Always observe BEFORE interacting — never guess " +
+                "element positions. By default returns a COMPACT tree: layout wrappers are hidden and only " +
+                "meaningful elements are shown (text, descriptions, inputs, images, clickable/scrollable/checkable " +
+                "nodes), one line each with a node id (#n), short resource-id, state flags and tap center (@x,y). " +
+                "Use mode='text' for just the readable content (cheapest), or mode='full' for every raw node with " +
+                "bounds (verbose, avoid). To explore large screens incrementally, pass max_depth to collapse deep " +
+                "subtrees, then call again with node_id to expand one. Use find_elements to search and " +
+                "inspect_element for details on one node. PREFER this over take_screenshot — it is faster, cheaper, " +
+                "and structured; use take_screenshot only for WebViews, images or visual layout.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("mode") {
+                    put("type", "string")
+                    put("description", "compact (default): meaningful elements only. text: readable text/descriptions only. full: every raw node.")
+                    putJsonArray("enum") { add(JsonPrimitive("compact")); add(JsonPrimitive("text")); add(JsonPrimitive("full")) }
+                }
+                putJsonObject("node_id") {
+                    put("type", "integer")
+                    put("description", "Only show the subtree under this node id from the previous dump. Implies refresh=false.")
+                }
+                putJsonObject("max_depth") {
+                    put("type", "integer")
+                    put("description", "Collapse subtrees deeper than this into a one-line summary (default: unlimited)")
+                }
+                putJsonObject("max_lines") {
+                    put("type", "integer")
+                    put("description", "Truncate output after this many lines (default: 200, full mode: 500)")
+                }
+                putJsonObject("refresh") {
+                    put("type", "boolean")
+                    put("description", "Capture the screen again (default: true, false when node_id is given)")
+                }
+            },
+            required = emptyList()
+        )
+    ) { request ->
+        val args = request.arguments
+        val nodeId = args?.get("node_id")?.jsonPrimitive?.intOrNull
+        val refresh = args?.get("refresh")?.jsonPrimitive?.booleanOrNull ?: (nodeId == null)
+        val screen = if (refresh) captureScreen() else cachedOrCapture()
+        val from = nodeId ?: 0
+        if (screen.node(from) == null) return@addTool unknownNode(from, screen)
+        val maxDepth = args?.get("max_depth")?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE
+        val body = when (args?.get("mode")?.jsonPrimitive?.content ?: "compact") {
+            "text" -> screen.renderText(from, maxLines = args?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 200)
+            "full" -> screen.renderFull(from, maxDepth, maxLines = args?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 500)
+            else -> screen.renderCompact(from, maxDepth, maxLines = args?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 200)
+        }
+        CallToolResult(content = listOf(TextContent(screen.header() + "\n" + body)))
+    }
+
+    server.addTool(
+        name = "find_elements",
+        description = "Search the screen for elements instead of reading the whole tree. All given filters must " +
+                "match; string filters are case-insensitive substring matches. Returns one line per match with " +
+                "its node id, the clickable ancestor to tap if the match itself isn't clickable, and its container. " +
+                "Captures the screen fresh unless refresh=false or 'within' is given.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Matches text, content-description or resource-id")
+                }
+                putJsonObject("text") { put("type", "string"); put("description", "Text contains") }
+                putJsonObject("description") { put("type", "string"); put("description", "Content-description contains") }
+                putJsonObject("resource_id") { put("type", "string"); put("description", "Resource-id contains") }
+                putJsonObject("class_name") { put("type", "string"); put("description", "Class name contains, e.g. EditText") }
+                putJsonObject("type") {
+                    put("type", "string")
+                    put("description", "Element kind")
+                    putJsonArray("enum") { NodeType.entries.forEach { add(JsonPrimitive(it.name.lowercase())) } }
+                }
+                putJsonObject("clickable") { put("type", "boolean"); put("description", "Only (non-)clickable elements") }
+                putJsonObject("scrollable") { put("type", "boolean"); put("description", "Only (non-)scrollable elements") }
+                putJsonObject("within") {
+                    put("type", "integer")
+                    put("description", "Only search inside this node id from the previous dump")
+                }
+                putJsonObject("limit") { put("type", "integer"); put("description", "Max results (default: 50)") }
+                putJsonObject("refresh") { put("type", "boolean"); put("description", "Capture the screen again (default: true unless 'within' is given)") }
+            },
+            required = emptyList()
+        )
+    ) { request ->
+        val args = request.arguments
+        fun str(key: String) = args?.get(key)?.jsonPrimitive?.content?.takeIf { it.isNotEmpty() }
+        fun bool(key: String) = args?.get(key)?.jsonPrimitive?.booleanOrNull
+        val within = args?.get("within")?.jsonPrimitive?.intOrNull
+        val type = str("type")?.let { t ->
+            NodeType.entries.firstOrNull { it.name.equals(t, ignoreCase = true) }
+                ?: return@addTool CallToolResult(content = listOf(TextContent("Unknown type: $t")), isError = true)
+        }
+        val query = ScreenQuery(
+            any = str("query"), text = str("text"), description = str("description"),
+            resourceId = str("resource_id"), className = str("class_name"), type = type,
+            clickable = bool("clickable"), scrollable = bool("scrollable"), within = within,
+        )
+        if (query == ScreenQuery()) {
+            return@addTool CallToolResult(content = listOf(TextContent("Provide at least one filter")), isError = true)
+        }
+        val screen = if (bool("refresh") ?: (within == null)) captureScreen() else cachedOrCapture()
+        if (within != null && screen.node(within) == null) return@addTool unknownNode(within, screen)
+        val limit = args?.get("limit")?.jsonPrimitive?.intOrNull ?: 50
+        CallToolResult(content = listOf(TextContent(screen.header() + "\n" + screen.renderQuery(query, limit))))
+    }
+
+    server.addTool(
+        name = "inspect_element",
+        description = "Show everything about one node id from the previous dump_screen/find_elements: all " +
+                "attributes, full bounds, its ancestors, its direct meaningful children, and a unique selector " +
+                "to use with click/type_text (or a hint to tap by node_id when none exists). Does not re-capture the screen.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("node_id") {
+                    put("type", "integer")
+                    put("description", "Node id (#n) from the previous dump")
+                }
+            },
+            required = listOf("node_id")
+        )
+    ) { request ->
+        val id = request.arguments?.get("node_id")?.jsonPrimitive?.intOrNull
+            ?: return@addTool CallToolResult(content = listOf(TextContent("Missing 'node_id' parameter")), isError = true)
+        val screen = cachedOrCapture()
+        if (screen.node(id) == null) return@addTool unknownNode(id, screen)
+        CallToolResult(content = listOf(TextContent("Snapshot v${screen.version}\n" + screen.describe(id))))
     }
 
     server.addTool(
@@ -288,9 +415,10 @@ fun runMcpServer(interactor: AdbDeviceInteractor) {
 
     server.addTool(
         name = "tap",
-        description = "Tap at raw pixel coordinates. Only use this as a last resort when selector-based click " +
-                "doesn't work (e.g. WebView content, canvas elements). Always call dump_screen or take_screenshot " +
-                "first to understand what's at those coordinates. Use device_info to get the screen dimensions. " +
+        description = "Tap at raw pixel coordinates, or at the center of a node id (#n) from the previous " +
+                "dump_screen/find_elements (pass node_id instead of x/y). Prefer selector-based click when the " +
+                "element has a unique selector; use this for WebView/canvas content or elements without one. " +
+                "Always call dump_screen or take_screenshot first to understand what's at those coordinates. " +
                 "Supports multi-tap (double-tap, triple-tap, etc.) via the count parameter.",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
@@ -302,6 +430,10 @@ fun runMcpServer(interactor: AdbDeviceInteractor) {
                     put("type", "integer")
                     put("description", "Y coordinate in pixels")
                 }
+                putJsonObject("node_id") {
+                    put("type", "integer")
+                    put("description", "Tap the center of this node id from the previous dump instead of x/y")
+                }
                 putJsonObject("count") {
                     put("type", "integer")
                     put("description", "Number of taps to perform (default: 1). Use 2 for double-tap, 3 for triple-tap, etc.")
@@ -311,13 +443,24 @@ fun runMcpServer(interactor: AdbDeviceInteractor) {
                     put("description", "Delay in milliseconds between consecutive taps (default: 50)")
                 }
             },
-            required = listOf("x", "y")
+            required = emptyList()
         )
     ) { request ->
-        val x = request.arguments?.get("x")?.jsonPrimitive?.intOrNull
-            ?: return@addTool CallToolResult(content = listOf(TextContent("Missing 'x' parameter")), isError = true)
-        val y = request.arguments?.get("y")?.jsonPrimitive?.intOrNull
-            ?: return@addTool CallToolResult(content = listOf(TextContent("Missing 'y' parameter")), isError = true)
+        val nodeId = request.arguments?.get("node_id")?.jsonPrimitive?.intOrNull
+        val (x, y) = if (nodeId != null) {
+            val screen = snapshot
+                ?: return@addTool CallToolResult(content = listOf(TextContent("No previous dump — call dump_screen first")), isError = true)
+            val node = screen.node(nodeId) ?: return@addTool unknownNode(nodeId, screen)
+            val bounds = node.bounds
+                ?: return@addTool CallToolResult(content = listOf(TextContent("Node #$nodeId has no bounds")), isError = true)
+            bounds.centerX() to bounds.centerY()
+        } else {
+            val x = request.arguments?.get("x")?.jsonPrimitive?.intOrNull
+                ?: return@addTool CallToolResult(content = listOf(TextContent("Provide 'node_id' or both 'x' and 'y'")), isError = true)
+            val y = request.arguments?.get("y")?.jsonPrimitive?.intOrNull
+                ?: return@addTool CallToolResult(content = listOf(TextContent("Provide 'node_id' or both 'x' and 'y'")), isError = true)
+            x to y
+        }
         val count = request.arguments?.get("count")?.jsonPrimitive?.intOrNull ?: 1
         val delayBetweenMs = request.arguments?.get("delay_between_ms")?.jsonPrimitive?.intOrNull ?: 50
         repeat(count) { i ->
@@ -1014,6 +1157,12 @@ private fun nodeMatches(node: ScreenNode, selector: Selector): Boolean = when (s
     is Selector.ByDescription -> node.contentDescription == selector.description
 }
 
+private fun unknownNode(id: Int, screen: ScreenSnapshot): CallToolResult =
+    CallToolResult(
+        content = listOf(TextContent("No node #$id in snapshot v${screen.version} (ids 0..${screen.size - 1}). Call dump_screen to get fresh ids.")),
+        isError = true
+    )
+
 private fun missingSelector(): CallToolResult =
     CallToolResult(
         content = listOf(TextContent("Missing or invalid selector_type/value parameters")),
@@ -1156,8 +1305,9 @@ private fun executeStep(
                 StepResult("Pressed home")
             }
             "dump_screen" -> {
-                val screen = interactor.dumpScreen()
-                StepResult("Screen dump:\n${screen.prettyPrint()}")
+                val screen = ScreenSnapshot(interactor.dumpScreen())
+                val body = if (step["mode"]?.jsonPrimitive?.content == "text") screen.renderText() else screen.renderCompact()
+                StepResult("Screen dump (node ids are not reusable outside this sequence):\n$body")
             }
             "take_screenshot" -> {
                 val name = step["name"]?.jsonPrimitive?.content ?: "screenshot"

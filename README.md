@@ -45,7 +45,9 @@ The core insight: driving a device through MCP works, but it's **slow and expens
 
 | Tool | Description |
 |------|-------------|
-| `dump_screen` | Returns the full UI element tree with text, resource-id, content-description, class, bounds, and state. **Prefer this over `take_screenshot`** — it's faster and returns structured data |
+| `dump_screen` | Compact UI tree: layout wrappers hidden, only meaningful elements (text, images, inputs, clickable/scrollable) with node ids (`#n`). `mode=text` for readable content only, `mode=full` for every raw node. `max_depth` collapses subtrees, `node_id` expands one. **Prefer this over `take_screenshot`** |
+| `find_elements` | Query the screen (text / description / resource-id / class / type / clickable / scrollable, optionally `within` a node) instead of reading the whole tree |
+| `inspect_element` | Full details for one node id: attributes, bounds, ancestors, children, and a unique selector to use |
 | `take_screenshot` | Captures a PNG screenshot. Only use when `dump_screen` doesn't provide enough info (WebViews, images, visual layout) |
 | `device_info` | Returns display size, density, and current foreground package |
 | `wait_for` | Waits for an element to appear on screen (by selector) |
@@ -56,11 +58,23 @@ The core insight: driving a device through MCP works, but it's **slow and expens
 | `type_text` | Types text into an input field found by selector |
 | `clear_and_type` | Clears an input field and types new text |
 | `scroll_until_found` | Scrolls repeatedly until a target element becomes visible |
-| `tap` | Taps at raw pixel coordinates (fallback for WebViews/canvas) |
+| `tap` | Taps at raw pixel coordinates, or the center of a node id from the last dump (fallback for WebViews/canvas or elements without a unique selector) |
 | `swipe` | Swipes the screen in a direction |
 | `press_back` | Presses the Android back button |
 | `press_home` | Presses the Android home button |
 | `logcat` | Dumps recent Android log lines for debugging |
+
+### Exploring a screen without reading everything
+
+Node ids come from the latest `dump_screen` / `find_elements` call and are only valid until the next capture.
+
+```
+dump_screen(max_depth=1)            # overview, deep lists collapsed to "… 40 more elements (…) — expand with node_id=11"
+dump_screen(node_id=11)             # expand just that list
+find_elements(query="sign in")      # → #10 TextView "Sign in"  → tap #8  in #8 LinearLayout
+inspect_element(node_id=8)          # → selector: resource_id="sign_in"
+click(selector_type="resource_id", value="sign_in")   # or tap(node_id=8)
+```
 
 ## Modules
 
